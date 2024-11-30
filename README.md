@@ -3,7 +3,7 @@
 Source: https://github.com/sherlock-audit/2024-11-superfluid-locking-contract-judging/issues/20 
 
 ## Found by 
-056Security, 0x73696d616f, Drynooo, IvanFitro, Kyosi, Z3R0, ke1caM, merlinboii, newspacexyz, redbeans, zhenyazhd
+056Security, 0x73696d616f, Drynooo, IvanFitro, Kyosi, Z3R0, ke1caM, newspacexyz, redbeans, zhenyazhd
 ### Summary
 
 [FluidLocker::_getUnlockingPercentage()](https://github.com/sherlock-audit/2024-11-superfluid-locking-contract/blob/main/fluid/packages/contracts/src/FluidLocker.sol#L384) calculates the percentage to unlock, which is the amount given to the user, while the remaining goes to other stakers. The formula incorrectly divides `Math.sqrt(unlockPeriod * _SCALER)` by `SCALER`:
@@ -58,12 +58,26 @@ function _getUnlockingPercentage(uint128 unlockPeriod) internal pure returns (ui
 }
 ```
 
+
+
+## Discussion
+
+**0xPilou**
+
+Fix for this issue is included in the following PR : https://github.com/superfluid-finance/fluid/pull/6
+
+**sherlock-admin2**
+
+The protocol team fixed this issue in the following PRs/commits:
+https://github.com/superfluid-finance/fluid/pull/6
+
+
 # Issue H-2: `FluidLocker::_getUnlockingPercentage()` uses 540 instead of `540 days` leading to stuck funds as the unlocking percentage will be bigger than `100%` and underflow 
 
 Source: https://github.com/sherlock-audit/2024-11-superfluid-locking-contract-judging/issues/21 
 
 ## Found by 
-0x73696d616f, Drynooo, zxriptor
+0x73696d616f, Drynooo, merlinboii, zxriptor
 ### Summary
 
 [FluidLocker::_getUnlockingPercentage()](https://github.com/sherlock-audit/2024-11-superfluid-locking-contract/blob/main/fluid/packages/contracts/src/FluidLocker.sol#L384) calculates the amount to unlock when unvesting via the `FluidLocker`. It incorrectly uses `540` instead of `540 days`, yielding a massive error such that the unlocking percentage will be much bigger than `10_000` and underflow.
@@ -115,6 +129,20 @@ will be bigger than the global flow rate, so it reverts when calculating the tax
 ### Mitigation
 
 Use `540 days` instead of `540`.
+
+
+
+## Discussion
+
+**0xPilou**
+
+Fix for this issue is included in the following PR : https://github.com/superfluid-finance/fluid/pull/6
+
+**sherlock-admin2**
+
+The protocol team fixed this issue in the following PRs/commits:
+https://github.com/superfluid-finance/fluid/pull/6
+
 
 # Issue H-3: `Fontaine` never stops the flows to the tax and recipient, so the buffer component of the flows will be lost 
 
@@ -174,7 +202,76 @@ function initialize(address unlockRecipient, int96 unlockFlowRate, int96 taxFlow
 
 Add a way to stop the flow and receive the deposit back.
 
-# Issue M-1: `FluidLocker::_getUnlockingPercentage()` divides before multiplying, suffering a significant precision error 
+# Issue M-1: An attacker may DoS user Fluid balance increases by frontrunning `FluidLocker::claim()` calls and calling `EP_PROGRAM_MANAGER::batchUpdateUserUnits()` directly 
+
+Source: https://github.com/sherlock-audit/2024-11-superfluid-locking-contract-judging/issues/19 
+
+## Found by 
+0x73696d616f
+### Summary
+
+[FluidLocker::claim()](https://github.com/sherlock-audit/2024-11-superfluid-locking-contract/blob/main/fluid/packages/contracts/src/FluidLocker.sol#L155) connects to the fluid pool and then calls `EPProgramManager::batchUpdateUserUnits()` to verify the signature and update user points.
+
+However, any attacker may frontrun this call and call directly `EPProgramManager::batchUpdateUserUnits()`, spending the signature (nonce) and making the claim transaction revert.
+
+As the Fluid balances only increase whenever the user connects to the pool, the user balance will be 0. 
+
+An attacker will profit from this because a large tax amount may be coming from a user instantly unlocking or a program being stopped, which transfer immediately funds to the stakers by calling `FLUID.distributeToPool(address(this), TAX_DISTRIBUTION_POOL, amount);`.
+
+As the user wanted to stake, they needed Fluid balance to do so, but as the attacker DoSed their claim transaction, they will not have balance to stake and will completely miss these large instant funds. Even if users had already staked before, this claim transaction could be increasing their points (by increasing their program points, they could get more Fluid and stake more Fluid to get more staker points), so an attacker profits from not allowing the user to do so just before the tax is distributed.
+
+Note1: the tax is distributed pro-rata to the units of each user, so if the attacker denies a user increasing their funds, the attacker will receive a larger share of the funds.
+
+### Root Cause
+
+`EP_PROGRAM_MANAGER::updateUserUnits()` may be called directly allowing attackers to DoS `FluidLocker::claim()`.
+
+### Internal pre-conditions
+
+None.
+
+### External pre-conditions
+
+None.
+
+### Attack Path
+
+1. Attacker spots that a user is unlocking or a program is coming to an end and a large sum of tax is coming.
+2. Attacker frontruns users that are going to increase their Fluid balance in the Locker by calling `FluidLocker::claim()` so that the Locker connects to the program pool and receives the corresponding Fluid tokens.
+3. Due to the `FluidLocker::claim()` call reverting, users will have less Fluid in the Locker and will stake less funds, getting less points, which means the attacker will get a bigger share of the incoming TAX distribution.
+
+### Impact
+
+Attacker profits from having a bigger share of the TAX distributions and users lose this share.
+
+### PoC
+
+The only way to collect the Locker to the program pool is by calling `FluidLocker::claim()` which may be DoSed by calling EP_PROGRAM_MANAGER.updateUserUnits()` directly using the same signature.
+```solidity
+function claim(uint256 programId, uint256 totalProgramUnits, uint256 nonce, bytes memory stackSignature)
+    external
+    nonReentrant
+{
+    // Get the corresponding program pool
+    ISuperfluidPool programPool = EP_PROGRAM_MANAGER.getProgramPool(programId);
+
+    if (!FLUID.isMemberConnected(address(programPool), address(this))) {
+        // Connect this locker to the Program Pool
+        FLUID.connectPool(programPool);
+    }
+
+    // Request program manager to update this locker's units
+    EP_PROGRAM_MANAGER.updateUserUnits(lockerOwner, programId, totalProgramUnits, nonce, stackSignature);
+
+    emit IFluidLocker.FluidStreamClaimed(programId, totalProgramUnits);
+}
+```
+
+### Mitigation
+
+The locker should have a separate method to connect to the pool.
+
+# Issue M-2: `FluidLocker::_getUnlockingPercentage()` divides before multiplying, suffering a significant precision error 
 
 Source: https://github.com/sherlock-audit/2024-11-superfluid-locking-contract-judging/issues/22 
 
@@ -231,7 +328,21 @@ Presented in the summary.
 
 Multiply before dividing as it will never overflow.
 
-# Issue M-2: A malicious user may unlock instantly all the funds from the `FluidLocker` when no one is staking in the Tax pool 
+
+
+## Discussion
+
+**0xPilou**
+
+Fix for this issue is included in the following PR : https://github.com/superfluid-finance/fluid/pull/6
+
+**sherlock-admin2**
+
+The protocol team fixed this issue in the following PRs/commits:
+https://github.com/superfluid-finance/fluid/pull/6
+
+
+# Issue M-3: A malicious user may unlock instantly all the funds from the `FluidLocker` when no one is staking in the Tax pool 
 
 Source: https://github.com/sherlock-audit/2024-11-superfluid-locking-contract-judging/issues/24 
 
@@ -289,4 +400,18 @@ function test_POC_InstantUnlock_WithoutFees() external {
 ### Mitigation
 
 Check if the pools have 0 units and revert if so.
+
+
+
+## Discussion
+
+**0xPilou**
+
+Fix for this issue is included in the following PR : https://github.com/superfluid-finance/fluid/pull/7
+
+**sherlock-admin2**
+
+The protocol team fixed this issue in the following PRs/commits:
+https://github.com/superfluid-finance/fluid/pull/7
+
 
