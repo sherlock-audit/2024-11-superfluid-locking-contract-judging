@@ -202,6 +202,20 @@ function initialize(address unlockRecipient, int96 unlockFlowRate, int96 taxFlow
 
 Add a way to stop the flow and receive the deposit back.
 
+
+
+## Discussion
+
+**0xPilou**
+
+Fix for this issue is included in the following PR : https://github.com/superfluid-finance/fluid/pull/8
+
+**sherlock-admin2**
+
+The protocol team fixed this issue in the following PRs/commits:
+https://github.com/superfluid-finance/fluid/pull/8
+
+
 # Issue M-1: An attacker may DoS user Fluid balance increases by frontrunning `FluidLocker::claim()` calls and calling `EP_PROGRAM_MANAGER::batchUpdateUserUnits()` directly 
 
 Source: https://github.com/sherlock-audit/2024-11-superfluid-locking-contract-judging/issues/19 
@@ -270,6 +284,20 @@ function claim(uint256 programId, uint256 totalProgramUnits, uint256 nonce, byte
 ### Mitigation
 
 The locker should have a separate method to connect to the pool.
+
+
+
+## Discussion
+
+**0xPilou**
+
+Fix for this issue is included in the following PR : https://github.com/superfluid-finance/fluid/pull/9
+
+**sherlock-admin2**
+
+The protocol team fixed this issue in the following PRs/commits:
+https://github.com/superfluid-finance/fluid/pull/9
+
 
 # Issue M-2: `FluidLocker::_getUnlockingPercentage()` divides before multiplying, suffering a significant precision error 
 
